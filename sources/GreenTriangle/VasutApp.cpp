@@ -86,34 +86,6 @@ public:
         wheel->updateGPU();
     }
 
-    void drawWheel() {
-        // 1. Draw wheel outline (blue)
-        Geometry<vec2> wheelOutline;
-        for (int i = 0; i <= 36; i++) { // First 37 points are the circle
-            vec2 v = wheel->Vtx()[i];
-            vec2 transformed = vec2(
-                v.x * cos(wheelAngle) - v.y * sin(wheelAngle) + wheelPosition.x,
-                v.x * sin(wheelAngle) + v.y * cos(wheelAngle) + wheelPosition.y
-            );
-            wheelOutline.Vtx().push_back(transformed);
-        }
-        wheelOutline.updateGPU();
-        wheelOutline.Draw(gpuProgram, GL_LINE_STRIP, vec3(0, 0, 1));
-
-        // 2. Draw spokes (white)
-        Geometry<vec2> wheelSpokes;
-        for (int i = 37; i < wheel->Vtx().size(); i++) {
-            vec2 v = wheel->Vtx()[i];
-            vec2 transformed = vec2(
-                v.x * cos(wheelAngle) - v.y * sin(wheelAngle) + wheelPosition.x,
-                v.x * sin(wheelAngle) + v.y * cos(wheelAngle) + wheelPosition.y
-            );
-            wheelSpokes.Vtx().push_back(transformed);
-        }
-        wheelSpokes.updateGPU();
-        wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1));
-    }
-
     vec2 calculateSplinePoint(float t) {
         if (pointList.size() < 2) return vec2(0, 0);
 
@@ -200,7 +172,7 @@ public:
     }
 
     void updateSplineGeometry() {
-        printf("Updating spline with %d points\n", pointList.size());
+        printf("Updating spline with %d points\n", (int)pointList.size());
         splinePoints->Vtx().clear();
         if (pointList.size() < 2) return;
 
@@ -210,48 +182,57 @@ public:
             splinePoints->Vtx().push_back(calculateSplinePoint(t));
         }
         splinePoints->updateGPU();
+
+        refreshScreen();
+    }
+
+    void drawWheel() {
+        if (!isSimulating) return;
+
+        // 1. Draw wheel outline (blue)
+        Geometry<vec2> wheelOutline;
+        const int segments = 36;
+        for (int i = 0; i <= segments; i++) {
+            float angle = 2.0f * M_PI * i / segments;
+            vec2 point(
+                wheelRadius * cos(angle + wheelAngle) + wheelPosition.x,
+                wheelRadius * sin(angle + wheelAngle) + wheelPosition.y
+            );
+            wheelOutline.Vtx().push_back(point);
+        }
+        wheelOutline.updateGPU();
+        wheelOutline.Draw(gpuProgram, GL_LINE_LOOP, vec3(0, 0, 1));
+
+        // 2. Draw spokes (white)
+        Geometry<vec2> wheelSpokes;
+        const int spokeCount = 4;
+        for (int i = 0; i < spokeCount; i++) {
+            float spokeAngle = wheelAngle + 2.0f * M_PI * i / spokeCount;
+            wheelSpokes.Vtx().push_back(wheelPosition);
+            wheelSpokes.Vtx().push_back(vec2(
+                wheelRadius * cos(spokeAngle) + wheelPosition.x,
+                wheelRadius * sin(spokeAngle) + wheelPosition.y
+            ));
+        }
+        wheelSpokes.updateGPU();
+        wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1));
     }
 
     void onDisplay() {
-        glClearColor(0, 0, 0, 0);
+        glClearColor(0.5, 0, 0.5, 0);
         glClear(GL_COLOR_BUFFER_BIT);
 
         // Draw spline
-        if (pointList.size() >= 2) {
+        if (pointList.size() > 1) {
             splinePoints->Draw(gpuProgram, GL_LINE_STRIP, vec3(1, 1, 0));
         }
 
         // Draw control points
         controlPoints->Draw(gpuProgram, GL_POINTS, vec3(1, 0, 0));
 
-        // Draw wheel
+        // Draw wheel if simulating
         if (isSimulating) {
             drawWheel();
-        }
-
-        if (isSimulating) {
-            printf("Drawing wheel at (%.2f, %.2f), angle: %.1f°\n",
-                wheelPosition.x, wheelPosition.y, wheelAngle * 180 / M_PI);
-
-            // 1. Draw transformed wheel points (red)
-            Geometry<vec2> debugWheel;
-            for (auto& v : wheel->Vtx()) {
-                vec2 transformed(
-                    v.x * cos(wheelAngle) - v.y * sin(wheelAngle) + wheelPosition.x,
-                    v.x * sin(wheelAngle) + v.y * cos(wheelAngle) + wheelPosition.y
-                );
-                debugWheel.Vtx().push_back(transformed);
-            }
-            debugWheel.updateGPU();
-            debugWheel.Draw(gpuProgram, GL_POINTS, vec3(1, 0, 0));
-
-            // 2. Draw wheel center (big green point)
-            Geometry<vec2> center;
-            center.Vtx().push_back(wheelPosition);
-            center.updateGPU();
-            glPointSize(20.0f);
-            center.Draw(gpuProgram, GL_POINTS, vec3(0, 1, 0));
-            glPointSize(10.0f);
         }
     }
 
@@ -272,17 +253,23 @@ public:
 
     void onKeyboard(int key) {
         if (key == ' ' && pointList.size() >= 2 && !isSimulating) {
-            printf("=== STARTING SIMULATION ===\n");
-            printf("Control points: %d\n", pointList.size());
-
-            // Initialize simulation state
             isSimulating = true;
             t = 0.0f;
             speed = 0.0f;
             wheelAngle = 0.0f;
-            wheelPosition = calculateSplinePoint(t); // Only set position once
+            wheelPosition = calculateSplinePoint(t);
+            wheelTangent = calculateSplineDerivative(t);
 
-            printf("Initial wheel position: (%.2f, %.2f)\n", wheelPosition.x, wheelPosition.y);
+            // Normalize initial tangent
+            if (length(wheelTangent) > 0) {
+                wheelTangent = normalize(wheelTangent);
+            }
+
+            // Ensure wheel geometry exists
+            if (wheel->Vtx().empty()) {
+                createWheelGeometry();
+            }
+
             refreshScreen();
         }
     }
@@ -303,37 +290,29 @@ public:
             return;
         }
 
-        // Calculate tangent and normal vectors
-        vec2 tangent = derivative / tangentLength;
-        vec2 normal(-tangent.y, tangent.x);
+        // Update tangent vector
+        wheelTangent = derivative / tangentLength;
 
-        // Calculate curvature (dT/ds)
-        vec2 dT = calculateSplineSecondDerivative(t) - tangent * dot(calculateSplineSecondDerivative(t), tangent);
+        // Calculate normal vector (always points "up" from track)
+        vec2 normal(-wheelTangent.y, wheelTangent.x);
+
+        // Calculate curvature
+        vec2 dT = calculateSplineSecondDerivative(t) - wheelTangent * dot(calculateSplineSecondDerivative(t), wheelTangent);
         float curvature = length(dT) / (tangentLength * tangentLength);
 
-        // Calculate required centripetal force
-        float requiredForce = speed * speed * curvature;
+        // Energy conservation for speed
+        float deltaHeight = pointList[0].y - wheelPosition.y;
+        speed = sqrt(2.0f * g * deltaHeight / (1.0f + 1.0f));
 
-        // Calculate available normal force (gravity component)
-        float gravityComponent = dot(vec2(0, -g), normal);
+        // Determine movement direction based on tangent
+        float movementDirection = (wheelTangent.x >= 0) ? 1.0f : -1.0f;
 
-        // Check if wheel stays on track
-        if (gravityComponent >= requiredForce) {
-            // On track - calculate new speed using energy conservation
-            float deltaHeight = pointList[0].y - wheelPosition.y;
-            speed = sqrt(2.0f * g * deltaHeight / (1.0f + 1.0f));
+        // Update position
+        t += movementDirection * speed * deltaTime / tangentLength;
+        t = clamp(t, 0.0f, 1.0f);  // Keep within [0,1] range
 
-            // Update position
-            t += speed * deltaTime / tangentLength;
-            t = fmod(t, 1.0f); // Wrap around if needed
-
-            // Update rotation
-            wheelAngle += speed * deltaTime / wheelRadius;
-        }
-        else {
-            // Wheel falls off
-            isSimulating = false;
-        }
+        // Update rotation - match direction with movement
+        wheelAngle -= movementDirection * speed * deltaTime / wheelRadius;
 
         refreshScreen();
     }
