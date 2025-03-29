@@ -26,9 +26,10 @@ const char* fragSource = R"(
 )";
 
 const int winWidth = 600, winHeight = 600;
-const float g = 10.0f; // gravity (40 m/s^2)
-const float wheelRadius = 1.0f / 20.0f; // 1m in normalized coordinates (20m world)
-const float dt = 0.01f; // time step for simulation
+const float g = 40.0f; // gravity (40 m/s^2)
+const float wheelRadius = 1.0f / 20.0f;
+const float dt = 0.01f;
+const float speedScale = 5.0f; // Add this new constant
 
 class VasutApp : public glApp {
     Geometry<vec2>* controlPoints;
@@ -45,9 +46,10 @@ class VasutApp : public glApp {
     float speed = 0.0f;
     float wheelAngle = 0.0f;
     float fallStartTime;
+    float initialHeight = 0.0f;
     const float minSpeed = 0.0f;      // Lower minimum speed
     const float maxSpeed = 2.0f;       // Reduced maximum speed
-    const float friction = 0.3f;       // Increased friction
+    const float friction = 0.1f;       // Increased friction
     const float speedFactor = 0.3f;    // Global speed reduction factor
     vec2 fallVelocity;
     vec2 fallStartPosition;
@@ -255,13 +257,13 @@ public:
             splinePoints->Draw(gpuProgram, GL_LINE_STRIP, vec3(1, 1, 0));
         }
 
-        // Draw control points
-        controlPoints->Draw(gpuProgram, GL_POINTS, vec3(1, 0, 0));
-
         // Draw wheel if simulating
         if (isSimulating) {
             drawWheel();
         }
+
+        // Draw control points
+        controlPoints->Draw(gpuProgram, GL_POINTS, vec3(1, 0, 0));
     }
 
     void onMousePressed(MouseButton button, int pX, int pY) {
@@ -281,23 +283,22 @@ public:
     void onKeyboard(int key) {
         if (key == ' ' && pointList.size() >= 2 && !isSimulating) {
             isSimulating = true;
-            t = 0.001f; // Start slightly ahead to avoid zero derivative
-            speed = 0.1f; // Small initial speed
+            t = 0.0f; // Start from beginning of spline
+            speed = 2.0f; // Strong initial push
             wheelAngle = 0.0f;
             isFalling = false;
             wheelColor = vec3(0, 0, 1);
 
             vec2 splinePoint = calculateSplinePoint(t);
-            vec2 derivative = calculateSplineDerivative(t);
+            initialHeight = splinePoint.y;
 
+            vec2 derivative = calculateSplineDerivative(t);
             if (length(derivative) > 0) {
                 wheelTangent = normalize(derivative);
                 wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
-                normalFlipped = (wheelNormal.y < 0);
-                if (normalFlipped) wheelNormal = -wheelNormal;
-
                 wheelPosition = splinePoint + wheelNormal * wheelRadius * 1.05f;
             }
+            printf("Starting at position: (%.4f, %.4f)\n", wheelPosition.x, wheelPosition.y);
             refreshScreen();
         }
     }
@@ -313,7 +314,7 @@ public:
         float deltaTime = endTime - startTime;
         if (deltaTime <= 0) return;
 
-        const float physicsStep = 0.005f;
+        const float physicsStep = 0.01f; // Increased physics step
         int steps = 0;
         while (deltaTime > 0 && steps++ < 100) {
             float dt = std::min(physicsStep, deltaTime);
@@ -326,19 +327,26 @@ public:
             if (tangentLength > 0.0001f) {
                 wheelTangent = normalize(derivative);
                 wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
-                if (normalFlipped) wheelNormal = -wheelNormal;
 
                 if (!isFalling) {
-                    // Physics calculations
+                    // Calculate acceleration based on slope
                     float acceleration = dot(vec2(0, -g), wheelTangent);
                     speed += acceleration * dt;
-                    speed = std::max(speed, 0.0f);
+                    speed = fmaxf(0.1f, speed); // Minimum speed
 
-                    // Move along spline
-                    t += speed * dt / tangentLength;
-                    t = std::min(t, 1.0f);
-                    wheelPosition = splinePoint + wheelNormal * wheelRadius * 1.1f;
+                    // Calculate parameter increment based on speed
+                    float deltaT = (speed * dt) / tangentLength;
+                    t += deltaT;
+
+                    // Update wheel position
+                    splinePoint = calculateSplinePoint(t);
+                    wheelPosition = splinePoint + wheelNormal * wheelRadius * 1.05f;
+
+                    // Update rotation
                     wheelAngle -= speed * dt / wheelRadius;
+
+                    printf("t: %.4f, speed: %.4f, pos: (%.4f, %.4f)\n",
+                        t, speed, wheelPosition.x, wheelPosition.y);
 
                     // Check for derailment
                     vec2 secondDeriv = calculateSplineSecondDerivative(t);
