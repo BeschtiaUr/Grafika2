@@ -283,17 +283,24 @@ public:
             return;
         }
 
-        // 2. Update tangent and normal vectors
+        // 2. Calculate tangent and CONSISTENT normal vectors
         wheelTangent = normalize(derivative);
+
+        // Calculate normal that always points "up" in world coordinates
         wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
 
-        // 3. Position wheel correctly on track
+        // FLIP NORMAL if it points downward (Y decreases downward in OpenGL)
+        if (wheelNormal.y < 0) {
+            wheelNormal = -wheelNormal;
+        }
+
+        // 3. Position wheel correctly on TOP of track
         wheelPosition = splinePoint + wheelNormal * wheelRadius;
 
         // 4. Calculate speed using energy conservation
         float initialHeight = pointList[0].y;
         float currentHeight = splinePoint.y;
-        speed = sqrt(2.0f * g * fabs(initialHeight - currentHeight) / (1.0f + 1.0f));
+        speed = sqrt(2.0f * g * (initialHeight - currentHeight) / (1.0f + 1.0f));
 
         // 5. Ensure minimum speed
         speed = fmax(speed, 0.01f);
