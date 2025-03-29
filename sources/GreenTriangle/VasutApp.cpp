@@ -41,10 +41,10 @@ class VasutApp : public glApp {
     bool isSimulating = false;
     float t = 0.0f; // spline parameter
     float speed = 0.0f;
-    vec2 wheelPosition;
-    vec2 wheelTangent;
     float wheelAngle = 0.0f;
-    vec2 wheelNormal;  // Add this line to store the normal vector
+    vec2 wheelPosition = vec2(0, 0);
+    vec2 wheelTangent = vec2(1, 0);
+    vec2 wheelNormal = vec2(1, 0);  // Add this line to store the normal vector
 
 public:
     VasutApp() : glApp("Roller Coaster Simulation") {}
@@ -217,13 +217,6 @@ public:
         }
         wheelSpokes.updateGPU();
         wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1));
-
-        // 3. DEBUG: Draw normal vector (green)
-        Geometry<vec2> normalLine;
-        normalLine.Vtx().push_back(wheelPosition);
-        normalLine.Vtx().push_back(wheelPosition + wheelNormal * wheelRadius * 1.5f);
-        normalLine.updateGPU();
-        normalLine.Draw(gpuProgram, GL_LINES, vec3(0, 1, 0));
     }
 
     void onDisplay() {
@@ -258,26 +251,18 @@ public:
             refreshScreen();
         }
     }
-
     void onKeyboard(int key) {
         if (key == ' ' && pointList.size() >= 2 && !isSimulating) {
             isSimulating = true;
             t = 0.0f;
-            speed = 0.0f;
+            speed = 0.1f;  // Give it a small initial speed
             wheelAngle = 0.0f;
             wheelPosition = calculateSplinePoint(t);
-            wheelTangent = calculateSplineDerivative(t);
-
-            // Normalize initial tangent
-            if (length(wheelTangent) > 0) {
-                wheelTangent = normalize(wheelTangent);
+            vec2 derivative = calculateSplineDerivative(t);
+            if (length(derivative) > 0) {
+                wheelTangent = normalize(derivative);
+                wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
             }
-
-            // Ensure wheel geometry exists
-            if (wheel->Vtx().empty()) {
-                createWheelGeometry();
-            }
-
             refreshScreen();
         }
     }
@@ -298,41 +283,39 @@ public:
             return;
         }
 
-        // 2. Calculate tangent and CONSISTENT normal vectors
+        // 2. Update tangent and normal vectors
         wheelTangent = normalize(derivative);
+        wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
 
-        // Calculate normal that always points "up" relative to track
-        if (wheelTangent.x >= 0) {
-            wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);  // Standard 90° CCW rotation
-        }
-        else {
-            wheelNormal = vec2(wheelTangent.y, -wheelTangent.x);  // Flip for left-moving segments
-        }
-
-        // Use wheelNormal instead of normal for positioning
+        // 3. Position wheel correctly on track
         wheelPosition = splinePoint + wheelNormal * wheelRadius;
 
         // 4. Calculate speed using energy conservation
         float initialHeight = pointList[0].y;
         float currentHeight = splinePoint.y;
-        speed = sqrt(2.0f * g * (initialHeight - currentHeight) / (1.0f + 1.0f));
+        speed = sqrt(2.0f * g * fabs(initialHeight - currentHeight) / (1.0f + 1.0f));
 
-        // 5. Update position parameter
+        // 5. Ensure minimum speed
+        speed = fmax(speed, 0.01f);
+
+        // 6. Update position parameter based on tangent direction
         t += speed * deltaTime / tangentLength;
 
-        // 6. Handle spline boundaries
+        // 7. Handle spline boundaries
         if (t < 0) {
             t = 0;
             speed = 0;
+            isSimulating = false;
         }
         else if (t > 1) {
             t = 1;
             speed = 0;
+            isSimulating = false;
         }
 
-        // 7. Update wheel rotation (distance = speed * dt)
+        // 8. Update wheel rotation (ensure it matches distance traveled)
         float distanceMoved = speed * deltaTime;
-        wheelAngle -= distanceMoved / wheelRadius;  // Negative for proper rolling direction
+        wheelAngle -= distanceMoved / wheelRadius;  // Negative for proper rolling
 
         refreshScreen();
     }
