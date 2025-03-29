@@ -280,21 +280,22 @@ public:
     void onKeyboard(int key) {
         if (key == ' ' && pointList.size() >= 2 && !isSimulating) {
             isSimulating = true;
-            t = 0.0f;
-            speed = 0.1f;
+            t = 0.001f; // Start slightly ahead to avoid zero derivative
+            speed = 0.1f; // Small initial speed
             wheelAngle = 0.0f;
-            wheelPosition = calculateSplinePoint(t);
+            isFalling = false;
+            wheelColor = vec3(0, 0, 1);
+
+            vec2 splinePoint = calculateSplinePoint(t);
             vec2 derivative = calculateSplineDerivative(t);
 
             if (length(derivative) > 0) {
                 wheelTangent = normalize(derivative);
                 wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
-
-                // Determine initial normal orientation once
                 normalFlipped = (wheelNormal.y < 0);
-                if (normalFlipped) {
-                    wheelNormal = -wheelNormal;
-                }
+                if (normalFlipped) wheelNormal = -wheelNormal;
+
+                wheelPosition = splinePoint + wheelNormal * wheelRadius * 1.05f;
             }
             refreshScreen();
         }
@@ -311,86 +312,131 @@ public:
         float deltaTime = endTime - startTime;
         if (deltaTime <= 0) return;
 
-        // 1. Get current track information
-        vec2 splinePoint = calculateSplinePoint(t);
-        vec2 derivative = calculateSplineDerivative(t);
-        float tangentLength = length(derivative);
+        const float physicsStep = 0.005f;
+        int steps = 0;
+        while (deltaTime > 0 && steps++ < 100) {
+            float dt = std::min(physicsStep, deltaTime);
+            deltaTime -= dt;
 
-        // 2. Calculate track orientation
-        wheelTangent = tangentLength > 0 ? normalize(derivative) : vec2(1, 0);
-        vec2 normal(-wheelTangent.y, wheelTangent.x);
+            vec2 splinePoint = calculateSplinePoint(t);
+            vec2 derivative = calculateSplineDerivative(t);
+            float tangentLength = length(derivative);
 
-        // 3. Physics calculations
-        float curvature = length(calculateSplineSecondDerivative(t)) / (tangentLength * tangentLength);
-        float requiredNormalForce = speed * speed * curvature;
-        float availableNormalForce = dot(vec2(0, -g), normal);
+            if (tangentLength > 0.0001f) {
+                wheelTangent = normalize(derivative);
+                wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
+                if (normalFlipped) wheelNormal = -wheelNormal;
 
-        // 4. Check for falling condition
-        if (!isFalling && availableNormalForce < requiredNormalForce) {
-            isFalling = true;
-            fallVelocity = speed * wheelTangent; // Initial falling velocity
-            fallStartTime = endTime;
-            wheelColor = vec3(1, 0, 0); // Red when falling
-        }
+                if (!isFalling) {
+                    // Calculate physics
+                    float acceleration = dot(vec2(0, -g), wheelTangent);
+                    speed += acceleration * dt;
+                    speed = std::max(speed, 0.0f);
 
-        // 5. Handle movement based on state
-        if (!isFalling) {
-            // On-track movement
-            float acceleration = dot(vec2(0, -g), wheelTangent) - friction;
-            speed += acceleration * deltaTime;
-            speed = fmax(speed, 0);
+                    // Move along spline
+                    float prevT = t;
+                    t += speed * dt / tangentLength;
+                    t = std::min(t, 1.0f);
 
-            t += speed * deltaTime / tangentLength;
-            wheelPosition = splinePoint + normal * wheelRadius;
-            wheelAngle -= speed * deltaTime / wheelRadius;
+                    // Calculate exact desired position
+                    vec2 newSplinePoint = calculateSplinePoint(t);
+                    vec2 newDerivative = calculateSplineDerivative(t);
+                    vec2 newNormal = vec2(-newDerivative.y, newDerivative.x);
+                    if (normalFlipped) newNormal = -newNormal;
 
-            if (speed <= 0.001f) isSimulating = false;
-        }
-        else {
-            // Falling movement with collision detection
-            vec2 gravity(0, -g);
-            vec2 newPosition = wheelPosition + fallVelocity * deltaTime +
-                0.5f * gravity * deltaTime * deltaTime;
+                    vec2 desiredPosition = newSplinePoint + newNormal * wheelRadius * 1.02f;
 
-            // Collision detection against track
-            bool collided = false;
-            vec2 collisionNormal;
-            float closestDistance = wheelRadius * 1.1f; // 10% tolerance
+                    // Continuous collision check
+                    bool willCollide = false;
+                    float checkSteps = 10.0f;
+                    for (float i = 1; i <= checkSteps; i++) {
+                        float checkT = prevT + (t - prevT) * (i / checkSteps);
+                        vec2 checkPoint = calculateSplinePoint(checkT);
+                        vec2 checkDeriv = calculateSplineDerivative(checkT);
+                        vec2 checkNormal = vec2(-checkDeriv.y, checkDeriv.x);
+                        if (normalFlipped) checkNormal = -checkNormal;
 
-            // Only check nearby points for performance
-            int startIdx = max(0, (int)(t * splinePoints->Vtx().size()) - 10);
-            int endIdx = min((int)splinePoints->Vtx().size(), startIdx + 20);
+                        vec2 checkWheelPos = checkPoint + checkNormal * wheelRadius * 1.02f;
+                        if (length(wheelPosition - checkWheelPos) > wheelRadius * 0.3f) {
+                            willCollide = true;
+                            break;
+                        }
+                    }
 
-            for (int i = startIdx; i < endIdx; i++) {
-                float dist = length(newPosition - splinePoints->Vtx()[i]);
-                if (dist < closestDistance) {
-                    closestDistance = dist;
-                    collisionNormal = normalize(newPosition - splinePoints->Vtx()[i]);
+                    if (!willCollide) {
+                        wheelPosition = desiredPosition;
+                        wheelAngle -= speed * dt / wheelRadius;
+                    }
+                    else {
+                        isFalling = true;
+                        fallVelocity = speed * wheelTangent;
+                        wheelColor = vec3(1, 0, 0);
+                    }
+                }
+                else {
+                    // Falling physics with continuous collision
+                    vec2 newPosition = wheelPosition + fallVelocity * dt + 0.5f * vec2(0, -g) * dt * dt;
+
+                    // Check against spline segments
+                    float minDist = FLT_MAX;
+                    vec2 closestPoint;
+                    int steps = 100;
+                    for (int i = 0; i < steps; i++) {
+                        float checkT = (float)i / (steps - 1);
+                        vec2 splinePt = calculateSplinePoint(checkT);
+                        float dist = length(newPosition - splinePt);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            closestPoint = splinePt;
+                        }
+                    }
+
+                    if (minDist < wheelRadius * 1.1f) {
+                        // Collision response
+                        vec2 collisionNormal = normalize(newPosition - closestPoint);
+                        wheelPosition = closestPoint + collisionNormal * wheelRadius * 1.1f;
+                        fallVelocity = reflect(fallVelocity, collisionNormal) * 0.7f;
+
+                        // Try to reattach
+                        if (length(fallVelocity) < 0.5f) {
+                            isFalling = false;
+                            wheelColor = vec3(0, 0, 1);
+                            t = findClosestSplineParameter(wheelPosition);
+                        }
+                    }
+                    else {
+                        wheelPosition = newPosition;
+                        fallVelocity += vec2(0, -g) * dt;
+                    }
+
+                    wheelAngle -= length(fallVelocity) * dt / wheelRadius;
+
+                    // Ground collision
+                    if (wheelPosition.y - wheelRadius <= -1.0f) {
+                        wheelPosition.y = -1.0f + wheelRadius;
+                        isSimulating = false;
+                    }
                 }
             }
+        }
+        refreshScreen();
+    }
 
-            if (closestDistance < wheelRadius * 1.1f) {
-                // Collision response
-                wheelPosition = splinePoints->Vtx()[startIdx] + collisionNormal * wheelRadius * 1.1f;
-                fallVelocity = reflectVector(fallVelocity, collisionNormal) * 0.7f; // 30% energy loss
-            }
-            else {
-                // Normal falling motion
-                wheelPosition = newPosition;
-                fallVelocity += gravity * deltaTime;
-            }
+    float findClosestSplineParameter(const vec2& position) {
+        float closestT = 0.0f;
+        float minDist = FLT_MAX;
+        const int steps = 100;
 
-            // Continue rotation during fall
-            wheelAngle -= length(fallVelocity) * deltaTime / wheelRadius;
-
-            // Ground collision (y = -1 is ground level in normalized coords)
-            if (wheelPosition.y - wheelRadius <= -1.0f) {
-                wheelPosition.y = -1.0f + wheelRadius;
-                isSimulating = false;
+        for (int i = 0; i <= steps; i++) {
+            float t = (float)i / steps;
+            vec2 point = calculateSplinePoint(t);
+            float dist = length(point - position);
+            if (dist < minDist) {
+                minDist = dist;
+                closestT = t;
             }
         }
-
-        refreshScreen();
+        return closestT;
     }
 };
 VasutApp app;
