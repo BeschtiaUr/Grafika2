@@ -44,10 +44,13 @@ class VasutApp : public glApp {
     float t = 0.0f; // spline parameter
     float speed = 0.0f;
     float wheelAngle = 0.0f;
+    float fallStartTime;
     const float minSpeed = 0.0f;      // Lower minimum speed
     const float maxSpeed = 2.0f;       // Reduced maximum speed
     const float friction = 0.3f;       // Increased friction
     const float speedFactor = 0.3f;    // Global speed reduction factor
+    vec2 fallVelocity;
+    vec2 fallStartPosition;
     vec2 wheelPosition = vec2(0, 0);
     vec2 wheelTangent = vec2(1, 0);
     vec2 wheelNormal = vec2(1, 0);  // Add this line to store the normal vector
@@ -297,57 +300,94 @@ public:
         }
     }
 
+    // Helper function to calculate reflection manually
+    vec2 reflectVector(vec2 incident, vec2 normal) {
+        return incident - 2.0f * dot(incident, normal) * normal;
+    }
+
     void onTimeElapsed(float startTime, float endTime) {
         if (!isSimulating) return;
 
         float deltaTime = endTime - startTime;
         if (deltaTime <= 0) return;
 
-        // 1. Get current position and derivatives
+        // 1. Get current track information
         vec2 splinePoint = calculateSplinePoint(t);
         vec2 derivative = calculateSplineDerivative(t);
         float tangentLength = length(derivative);
 
-        // 2. Calculate tangent and normal vectors
-        wheelTangent = normalize(derivative);
+        // 2. Calculate track orientation
+        wheelTangent = tangentLength > 0 ? normalize(derivative) : vec2(1, 0);
         vec2 normal(-wheelTangent.y, wheelTangent.x);
 
-        // 3. Calculate physics forces
-        vec2 gravity(0, -g);
-        float normalForce = dot(gravity, normal) + (speed * speed) / wheelRadius;
+        // 3. Physics calculations
+        float curvature = length(calculateSplineSecondDerivative(t)) / (tangentLength * tangentLength);
+        float requiredNormalForce = speed * speed * curvature;
+        float availableNormalForce = dot(vec2(0, -g), normal);
 
-        // 4. Check if wheel falls off (when normal force becomes negative)
-        if (normalForce < 0) {
-            // Free fall physics
-            wheelPosition += velocity * deltaTime + 0.5f * gravity * deltaTime * deltaTime;
-            velocity += gravity * deltaTime;
-            wheelAngle -= speed * deltaTime / wheelRadius;
-
-            // Optional: Add some visual feedback for falling
-            wheelColor = vec3(1, 0, 0); // Turns red when falling
-            refreshScreen();
-            return;
+        // 4. Check for falling condition
+        if (!isFalling && availableNormalForce < requiredNormalForce) {
+            isFalling = true;
+            fallVelocity = speed * wheelTangent; // Initial falling velocity
+            fallStartTime = endTime;
+            wheelColor = vec3(1, 0, 0); // Red when falling
         }
 
-        // 5. Track physics (only executed when still on track)
-        // Calculate acceleration along track
-        float acceleration = dot(gravity, wheelTangent) - friction;
+        // 5. Handle movement based on state
+        if (!isFalling) {
+            // On-track movement
+            float acceleration = dot(vec2(0, -g), wheelTangent) - friction;
+            speed += acceleration * deltaTime;
+            speed = fmax(speed, 0);
 
-        // Update speed and position
-        speed += acceleration * deltaTime;
-        speed = fmax(speed, 0.0f); // Don't allow negative speed
+            t += speed * deltaTime / tangentLength;
+            wheelPosition = splinePoint + normal * wheelRadius;
+            wheelAngle -= speed * deltaTime / wheelRadius;
 
-        // Update wheel position on track
-        t += speed * deltaTime / tangentLength;
-        wheelPosition = splinePoint + normal * wheelRadius;
+            if (speed <= 0.001f) isSimulating = false;
+        }
+        else {
+            // Falling movement with collision detection
+            vec2 gravity(0, -g);
+            vec2 newPosition = wheelPosition + fallVelocity * deltaTime +
+                0.5f * gravity * deltaTime * deltaTime;
 
-        // Update rotation
-        wheelAngle -= speed * deltaTime / wheelRadius;
+            // Collision detection against track
+            bool collided = false;
+            vec2 collisionNormal;
+            float closestDistance = wheelRadius * 1.1f; // 10% tolerance
 
-        // 6. Check if wheel stopped on track
-        if (speed <= 0.001f) {
-            isSimulating = false;
-            wheelColor = vec3(0, 0, 1); // Reset to blue
+            // Only check nearby points for performance
+            int startIdx = max(0, (int)(t * splinePoints->Vtx().size()) - 10);
+            int endIdx = min((int)splinePoints->Vtx().size(), startIdx + 20);
+
+            for (int i = startIdx; i < endIdx; i++) {
+                float dist = length(newPosition - splinePoints->Vtx()[i]);
+                if (dist < closestDistance) {
+                    closestDistance = dist;
+                    collisionNormal = normalize(newPosition - splinePoints->Vtx()[i]);
+                }
+            }
+
+            if (closestDistance < wheelRadius * 1.1f) {
+                // Collision response
+                wheelPosition = splinePoints->Vtx()[startIdx] + collisionNormal * wheelRadius * 1.1f;
+                fallVelocity = reflectVector(fallVelocity, collisionNormal) * 0.7f; // 30% energy loss
+            }
+            else {
+                // Normal falling motion
+                wheelPosition = newPosition;
+                fallVelocity += gravity * deltaTime;
+            }
+
+            // Continue rotation during fall
+            wheelAngle -= length(fallVelocity) * deltaTime / wheelRadius;
+
+            // Ground collision (y = -1 is ground level in normalized coords)
+            if (wheelPosition.y - wheelRadius <= -1.0f) {
+                wheelPosition.y = -1.0f + wheelRadius;
+                isSimulating = false;
+            }
         }
 
         refreshScreen();
