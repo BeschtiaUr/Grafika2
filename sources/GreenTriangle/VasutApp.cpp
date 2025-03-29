@@ -44,6 +44,7 @@ class VasutApp : public glApp {
     vec2 wheelPosition;
     vec2 wheelTangent;
     float wheelAngle = 0.0f;
+    vec2 wheelNormal;  // Add this line to store the normal vector
 
 public:
     VasutApp() : glApp("Roller Coaster Simulation") {}
@@ -195,8 +196,8 @@ public:
         for (int i = 0; i <= segments; i++) {
             float angle = 2.0f * M_PI * i / segments;
             vec2 point(
-                wheelRadius * cos(angle + wheelAngle) + wheelPosition.x,
-                wheelRadius * sin(angle + wheelAngle) + wheelPosition.y
+                wheelRadius * cos(angle) + wheelPosition.x,
+                wheelRadius * sin(angle) + wheelPosition.y
             );
             wheelOutline.Vtx().push_back(point);
         }
@@ -216,6 +217,13 @@ public:
         }
         wheelSpokes.updateGPU();
         wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1));
+
+        // 3. DEBUG: Draw normal vector (green)
+        Geometry<vec2> normalLine;
+        normalLine.Vtx().push_back(wheelPosition);
+        normalLine.Vtx().push_back(wheelPosition + wheelNormal * wheelRadius * 1.5f);
+        normalLine.updateGPU();
+        normalLine.Draw(gpuProgram, GL_LINES, vec3(0, 1, 0));
     }
 
     void onDisplay() {
@@ -280,8 +288,8 @@ public:
         float deltaTime = endTime - startTime;
         if (deltaTime <= 0) return;
 
-        // Get current position and derivatives
-        wheelPosition = calculateSplinePoint(t);
+        // 1. Get current spline position and derivatives
+        vec2 splinePoint = calculateSplinePoint(t);
         vec2 derivative = calculateSplineDerivative(t);
         float tangentLength = length(derivative);
 
@@ -290,29 +298,41 @@ public:
             return;
         }
 
-        // Update tangent vector
-        wheelTangent = derivative / tangentLength;
+        // 2. Calculate tangent and CONSISTENT normal vectors
+        wheelTangent = normalize(derivative);
 
-        // Calculate normal vector (always points "up" from track)
-        vec2 normal(-wheelTangent.y, wheelTangent.x);
+        // Calculate normal that always points "up" relative to track
+        if (wheelTangent.x >= 0) {
+            wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);  // Standard 90° CCW rotation
+        }
+        else {
+            wheelNormal = vec2(wheelTangent.y, -wheelTangent.x);  // Flip for left-moving segments
+        }
 
-        // Calculate curvature
-        vec2 dT = calculateSplineSecondDerivative(t) - wheelTangent * dot(calculateSplineSecondDerivative(t), wheelTangent);
-        float curvature = length(dT) / (tangentLength * tangentLength);
+        // Use wheelNormal instead of normal for positioning
+        wheelPosition = splinePoint + wheelNormal * wheelRadius;
 
-        // Energy conservation for speed
-        float deltaHeight = pointList[0].y - wheelPosition.y;
-        speed = sqrt(2.0f * g * deltaHeight / (1.0f + 1.0f));
+        // 4. Calculate speed using energy conservation
+        float initialHeight = pointList[0].y;
+        float currentHeight = splinePoint.y;
+        speed = sqrt(2.0f * g * (initialHeight - currentHeight) / (1.0f + 1.0f));
 
-        // Determine movement direction based on tangent
-        float movementDirection = (wheelTangent.x >= 0) ? 1.0f : -1.0f;
+        // 5. Update position parameter
+        t += speed * deltaTime / tangentLength;
 
-        // Update position
-        t += movementDirection * speed * deltaTime / tangentLength;
-        t = clamp(t, 0.0f, 1.0f);  // Keep within [0,1] range
+        // 6. Handle spline boundaries
+        if (t < 0) {
+            t = 0;
+            speed = 0;
+        }
+        else if (t > 1) {
+            t = 1;
+            speed = 0;
+        }
 
-        // Update rotation - match direction with movement
-        wheelAngle -= movementDirection * speed * deltaTime / wheelRadius;
+        // 7. Update wheel rotation (distance = speed * dt)
+        float distanceMoved = speed * deltaTime;
+        wheelAngle -= distanceMoved / wheelRadius;  // Negative for proper rolling direction
 
         refreshScreen();
     }
