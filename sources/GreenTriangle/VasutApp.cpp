@@ -40,6 +40,7 @@ class VasutApp : public glApp {
     // Simulation variables
     bool isSimulating = false;
     bool normalFlipped = false;  // Add this to track normal orientation
+    bool isFalling = false;           // Track falling state
     float t = 0.0f; // spline parameter
     float speed = 0.0f;
     float wheelAngle = 0.0f;
@@ -50,6 +51,8 @@ class VasutApp : public glApp {
     vec2 wheelPosition = vec2(0, 0);
     vec2 wheelTangent = vec2(1, 0);
     vec2 wheelNormal = vec2(1, 0);  // Add this line to store the normal vector
+    vec2 velocity = vec2(0, 0);       // Track velocity when falling
+    vec3 wheelColor = vec3(0, 0, 1);  // Blue normally, red when falling
 
 public:
     VasutApp() : glApp("Roller Coaster Simulation") {}
@@ -193,11 +196,11 @@ public:
     }
 
     void drawWheel() {
-        if (!isSimulating || speed <= 0.001f) return;
+        if (!isSimulating) return;
 
-        // 1. Draw filled blue wheel (using triangle fan)
+        // 1. Draw filled blue wheel (red if falling)
         Geometry<vec2> wheelFill;
-        wheelFill.Vtx().push_back(wheelPosition); // Center point
+        wheelFill.Vtx().push_back(wheelPosition); // Center
 
         const int segments = 36;
         for (int i = 0; i <= segments; i++) {
@@ -209,36 +212,34 @@ public:
             wheelFill.Vtx().push_back(point);
         }
         wheelFill.updateGPU();
-        wheelFill.Draw(gpuProgram, GL_TRIANGLE_FAN, vec3(0, 0, 1)); // Blue fill
+        wheelFill.Draw(gpuProgram, GL_TRIANGLE_FAN, wheelColor);
 
-        // 2. Draw white outline (using line loop)
+        // 2. Draw white outline
         Geometry<vec2> wheelOutline;
-        for (int i = 0; i <= segments; i++) {
-            float angle = 2.0f * M_PI * i / segments;
-            vec2 point(
-                wheelRadius * cos(angle) + wheelPosition.x,
-                wheelRadius * sin(angle) + wheelPosition.y
-            );
-            wheelOutline.Vtx().push_back(point);
+        for (const auto& v : wheelFill.Vtx()) {
+            if (v != wheelFill.Vtx()[0]) // Skip center point
+                wheelOutline.Vtx().push_back(v);
         }
         wheelOutline.updateGPU();
-        glLineWidth(1.5f); // Slightly thicker outline
-        wheelOutline.Draw(gpuProgram, GL_LINE_LOOP, vec3(1, 1, 1)); // White outline
-        glLineWidth(1.0f); // Reset to default
+        glLineWidth(1.5f);
+        wheelOutline.Draw(gpuProgram, GL_LINE_LOOP, vec3(1, 1, 1));
+        glLineWidth(1.0f);
 
-        // 3. Draw white spokes (using lines)
+        // 3. Draw spokes
         Geometry<vec2> wheelSpokes;
         const int spokeCount = 4;
         for (int i = 0; i < spokeCount; i++) {
             float spokeAngle = wheelAngle + 2.0f * M_PI * i / spokeCount;
-            wheelSpokes.Vtx().push_back(wheelPosition); // Center
+            wheelSpokes.Vtx().push_back(wheelPosition);
             wheelSpokes.Vtx().push_back(vec2(
                 wheelRadius * cos(spokeAngle) + wheelPosition.x,
                 wheelRadius * sin(spokeAngle) + wheelPosition.y
             ));
         }
         wheelSpokes.updateGPU();
-        wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1)); // White spokes
+        glLineWidth(2.0f);
+        wheelSpokes.Draw(gpuProgram, GL_LINES, vec3(1, 1, 1));
+        glLineWidth(1.0f);
     }
 
     void onDisplay() {
@@ -302,62 +303,52 @@ public:
         float deltaTime = endTime - startTime;
         if (deltaTime <= 0) return;
 
-        // 1. Get current spline position and derivatives
+        // 1. Get current position and derivatives
         vec2 splinePoint = calculateSplinePoint(t);
         vec2 derivative = calculateSplineDerivative(t);
         float tangentLength = length(derivative);
 
-        if (tangentLength < 0.0001f) {
-            isSimulating = false;
-            return;
-        }
-
-        // 2. Calculate tangent and maintain consistent normal orientation
+        // 2. Calculate tangent and normal vectors
         wheelTangent = normalize(derivative);
+        vec2 normal(-wheelTangent.y, wheelTangent.x);
 
-        // Calculate base normal (90° rotation of tangent)
-        vec2 baseNormal = vec2(-wheelTangent.y, wheelTangent.x);
-
-        // Apply initial flip decision consistently
-        wheelNormal = normalFlipped ? -baseNormal : baseNormal;
-
-        // 3. Position wheel on its original side of track
-        wheelPosition = splinePoint + wheelNormal * wheelRadius;
-
-        // 4. Calculate gravitational acceleration along the track
+        // 3. Calculate physics forces
         vec2 gravity(0, -g);
-        float acceleration = dot(gravity, wheelTangent) - friction;
+        float normalForce = dot(gravity, normal) + (speed * speed) / wheelRadius;
 
-        // 5. Update speed with controlled acceleration
-        speed += acceleration * deltaTime;
-        speed = fmax(speed, 0.0f);  // Allow speed to reach 0
-        speed = fmin(speed, maxSpeed);
+        // 4. Check if wheel falls off (when normal force becomes negative)
+        if (normalForce < 0) {
+            // Free fall physics
+            wheelPosition += velocity * deltaTime + 0.5f * gravity * deltaTime * deltaTime;
+            velocity += gravity * deltaTime;
+            wheelAngle -= speed * deltaTime / wheelRadius;
 
-        // 6. Check if wheel has stopped
-        if (speed <= 0.001f) {
-            isSimulating = false;
+            // Optional: Add some visual feedback for falling
+            wheelColor = vec3(1, 0, 0); // Turns red when falling
             refreshScreen();
             return;
         }
 
-        // 7. Update position parameter
+        // 5. Track physics (only executed when still on track)
+        // Calculate acceleration along track
+        float acceleration = dot(gravity, wheelTangent) - friction;
+
+        // Update speed and position
+        speed += acceleration * deltaTime;
+        speed = fmax(speed, 0.0f); // Don't allow negative speed
+
+        // Update wheel position on track
         t += speed * deltaTime / tangentLength;
+        wheelPosition = splinePoint + normal * wheelRadius;
 
-        // 8. Handle spline boundaries
-        if (t < 0) {
-            t = 0;
-            speed = 0;
-            isSimulating = false;
-        }
-        else if (t > 1) {
-            t = 1;
-            speed = 0;
-            isSimulating = false;
-        }
+        // Update rotation
+        wheelAngle -= speed * deltaTime / wheelRadius;
 
-        // 9. Update wheel rotation
-        float distanceMoved = speed * deltaTime;
-        wheelAngle -= distanceMoved / wheelRadius;
+        // 6. Check if wheel stopped on track
+        if (speed <= 0.001f) {
+            isSimulating = false;
+            wheelColor = vec3(0, 0, 1); // Reset to blue
+        }
 
         refreshScreen();
     }
