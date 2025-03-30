@@ -274,7 +274,7 @@ public:
             isSimulating = true;
             isFalling = false;
             t = 0.0f;
-            speed = initialPush; // Give initial push
+            speed = initialPush;
             wheelAngle = 0.0f;
 
             vec2 splinePoint = calculateSplinePoint(t);
@@ -283,9 +283,8 @@ public:
 
             if (length(derivative) > 0) {
                 wheelTangent = normalize(derivative);
+                // Calculate initial normal - always point "up" relative to movement direction
                 wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
-
-                // Ensure normal points "up" initially
                 if (wheelNormal.y < 0) {
                     wheelNormal = -wheelNormal;
                 }
@@ -312,79 +311,102 @@ public:
                 // Free fall physics
                 fallVelocity += vec2(0, -g) * dt;
                 wheelPosition += fallVelocity * dt;
-                wheelAngle -= 0.5f * length(fallVelocity) * dt / wheelRadius; // Slower rotation
+                wheelAngle -= 0.5f * length(fallVelocity) * dt / wheelRadius;
 
+                // Check if out of bounds
                 if (wheelPosition.x < -1 || wheelPosition.x > 1 || wheelPosition.y < -1) {
                     isSimulating = false;
                     break;
                 }
 
-                // Check for collision with track
-                float closestDistSq = std::numeric_limits<float>::max();
-                float closestT = 0.00001f;
-                const int steps = 100;
+                // Only check for collision if moving downward (prevent sticking at crossings)
+                if (fallVelocity.y < 0) {
+                    // Find closest point on track
+                    float closestDistSq = std::numeric_limits<float>::max();
+                    float closestT = t; // Start searching near current t
+                    const int searchSteps = 20;
+                    const float searchRange = 0.1f; // Search ±10% of track length
 
-                for (int i = 0; i <= steps; i++) {
-                    float testT = (float)i / steps;
-                    vec2 point = calculateSplinePoint(testT);
-                    float distSq = dot(wheelPosition - point, (wheelPosition - point) * 1.3f);
+                    for (int i = 0; i <= searchSteps; i++) {
+                        float testT = t + searchRange * (2.0f * i / searchSteps - 1.0f);
+                        testT = std::max(0.0f, std::min(1.0f, testT));
+                        vec2 point = calculateSplinePoint(testT);
+                        float distSq = dot(wheelPosition - point, wheelPosition - point);
 
-                    if (distSq < closestDistSq) {
-                        closestDistSq = distSq;
-                        closestT = testT;
+                        if (distSq < closestDistSq) {
+                            closestDistSq = distSq;
+                            closestT = testT;
+                        }
                     }
-                }
 
-                if (closestDistSq < wheelRadius * wheelRadius * 1.1f) {
-                    t = closestT;
-                    vec2 splinePoint = calculateSplinePoint(t);
-                    vec2 derivative = calculateSplineDerivative(t);
+                    // Only reattach if close enough and moving toward track
+                    if (closestDistSq < wheelRadius * wheelRadius * 1.1f) {
+                        vec2 closestPoint = calculateSplinePoint(closestT);
+                        vec2 toWheel = wheelPosition - closestPoint;
+                        if (dot(toWheel, fallVelocity) < 0) { // Moving toward track
+                            t = closestT;
+                            vec2 derivative = calculateSplineDerivative(t);
 
-                    if (length(derivative) > 0) {
-                        wheelTangent = normalize(derivative);
-                        wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
+                            if (length(derivative) > 0) {
+                                wheelTangent = normalize(derivative);
+                                wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
+                                if (wheelNormal.y < 0) wheelNormal = -wheelNormal;
 
-                        float currentHeight = splinePoint.y;
-                        speed = speedFactor * sqrt(2.0f * g * (initialHeight - currentHeight) / (1.0f + lambda));
-                        speed = std::max(speed, minSpeed);
-
-                        if (speed > 0) {
-                            isFalling = false;
-                            wheelPosition = splinePoint + wheelNormal * wheelRadius;
+                                // Only reattach if we have enough momentum
+                                if (length(fallVelocity) > minSpeed * 0.5f) {
+                                    speed = length(fallVelocity);
+                                    isFalling = false;
+                                    wheelPosition = closestPoint + wheelNormal * wheelRadius;
+                                }
+                            }
                         }
                     }
                 }
             }
             else {
-                // On-track physics
+                // On-track physics (same as before)
                 vec2 splinePoint = calculateSplinePoint(t);
                 vec2 derivative = calculateSplineDerivative(t);
                 float tangentLength = length(derivative);
 
                 if (tangentLength > 0.0001f) {
-                    wheelTangent = normalize(derivative);
-                    wheelNormal = vec2(-wheelTangent.y, wheelTangent.x);
+                    // Calculate tangent and maintain consistent normal
+                    vec2 newTangent = normalize(derivative);
+                    vec2 potentialNormal = vec2(-newTangent.y, newTangent.x);
 
-                    // Calculate acceleration from gravity and slope
-                    vec2 gravity(0, -g);
-                    float acceleration = dot(gravity, wheelTangent);
+                    if (dot(potentialNormal, wheelNormal) < 0) {
+                        potentialNormal = -potentialNormal;
+                    }
 
-                    // Apply friction (reduces acceleration)
-                    acceleration -= friction * (acceleration > 0 ? 1 : -1);
+                    if (length(newTangent - wheelTangent) > 0.01f) {
+                        wheelTangent = newTangent;
+                        wheelNormal = potentialNormal;
+                    }
+
+                    // PROPER SLOPE PHYSICS - FIXED HERE
+                    // Calculate slope angle (angle between tangent and horizontal)
+                    float slopeAngle = atan2(wheelTangent.y, wheelTangent.x);
+                    // Acceleration due to gravity along the slope
+                    float slopeAcceleration = -g * sin(slopeAngle); // Negative when going uphill
+
+                    // Apply friction (always opposes motion)
+                    float frictionAcceleration = -friction * (speed > 0 ? 1 : -1);
+
+                    // Combined acceleration
+                    float totalAcceleration = slopeAcceleration + frictionAcceleration;
 
                     // Update speed
-                    speed += acceleration * dt;
+                    speed += totalAcceleration * dt;
                     speed = std::max(speed, minSpeed);
 
                     // Calculate curvature and required centripetal force
                     float curvature = calculateCurvature(t);
                     float requiredCentripetal = speed * speed * curvature;
-
                     float gDotN = dot(vec2(0, -g), wheelNormal);
                     float availableForce = gDotN + requiredCentripetal;
 
-                    // Check if wheel falls off (when K would need to be negative)
-                    if (availableForce < 0) {
+                    // Only detach if physics requires AND we have some speed
+                    if (availableForce < 0 && speed > minSpeed * 0.5f) {
                         isFalling = true;
                         fallVelocity = speed * wheelTangent;
                         continue;
@@ -413,7 +435,7 @@ public:
                     // Update wheel position and rotation
                     splinePoint = calculateSplinePoint(t);
                     wheelPosition = splinePoint + wheelNormal * wheelRadius;
-                    wheelAngle -= 0.5f * speed * dt / wheelRadius; // Slower rotation
+                    wheelAngle -= 0.5f * speed * dt / wheelRadius;
                 }
                 else {
                     isSimulating = false;
