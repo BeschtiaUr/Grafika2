@@ -31,8 +31,8 @@ const float wheelRadius = 0.05f;
 const float dt = 0.01f;
 const float lambda = 1.0f;
 const float minSpeed = 0.1f; // Reduced minimum speed (0.5 -> 0.1)
-const float initialPush = 0.3f; // Reduced initial push (1.0 -> 0.3)
-const float friction = 0.2f; // Increased friction (0.1 -> 0.2)
+const float initialPush = 0.2f; // Reduced initial push (1.0 -> 0.2)
+const float friction = 0.3f; // Increased friction (0.1 -> 0.2)
 const float speedFactor = 0.5f; // Global speed reduction
 
 class VasutApp : public glApp {
@@ -339,6 +339,15 @@ public:
                         }
                     }
 
+                const int steps = 100;
+
+                for (int i = 0; i <= steps; i++) {
+                    float testT = (float)i / steps;
+                    vec2 point = calculateSplinePoint(testT);
+                    float distSq = dot(wheelPosition - point, (wheelPosition - point) * 1.3f);
+
+                }
+
                     // Only reattach if close enough and moving toward track
                     if (closestDistSq < wheelRadius * wheelRadius * 1.1f) {
                         vec2 closestPoint = calculateSplinePoint(closestT);
@@ -364,13 +373,12 @@ public:
                 }
             }
             else {
-                // On-track physics (same as before)
+                // On-track physics
                 vec2 splinePoint = calculateSplinePoint(t);
                 vec2 derivative = calculateSplineDerivative(t);
                 float tangentLength = length(derivative);
 
                 if (tangentLength > 0.0001f) {
-                    // Calculate tangent and maintain consistent normal
                     vec2 newTangent = normalize(derivative);
                     vec2 potentialNormal = vec2(-newTangent.y, newTangent.x);
 
@@ -383,59 +391,46 @@ public:
                         wheelNormal = potentialNormal;
                     }
 
-                    // PROPER SLOPE PHYSICS - FIXED HERE
-                    // Calculate slope angle (angle between tangent and horizontal)
-                    float slopeAngle = atan2(wheelTangent.y, wheelTangent.x);
-                    // Acceleration due to gravity along the slope
-                    float slopeAcceleration = -g * sin(slopeAngle); // Negative when going uphill
+                    // PROPER PHYSICS CALCULATION - FIXED VERSION
+                    // 1. Calculate current and next height for energy conservation
+                    float currentHeight = splinePoint.y;
+                    float nextHeight = calculateSplinePoint(t + 0.001f).y;
+                    float heightDiff = nextHeight - currentHeight;
 
-                    // Apply friction (always opposes motion)
-                    float frictionAcceleration = -friction * (speed > 0 ? 1 : -1);
+                    // 2. Calculate speed from energy conservation
+                    float targetSpeed = sqrt(fmax(
+                        speed * speed + 2.0f * g * (currentHeight - nextHeight) / (1.0f + lambda), 0.0f));
 
-                    // Combined acceleration
-                    float totalAcceleration = slopeAcceleration + frictionAcceleration;
+                    // 3. Apply gradual change to prevent instant jumps
+                    float speedChange = targetSpeed - speed*3;
+                    speed += 0.01f * speedChange; // Gradual adjustment
 
-                    // Update speed
-                    speed += totalAcceleration * dt;
-                    speed = std::max(speed, minSpeed);
+                    // 4. Apply friction (reduces speed regardless of slope)
+                    speed = fmax(minSpeed, speed - friction * dt);
 
-                    // Calculate curvature and required centripetal force
+                    // 5. Calculate curvature and detachment conditions
                     float curvature = calculateCurvature(t);
                     float requiredCentripetal = speed * speed * curvature;
-                    float gDotN = dot(vec2(0, -g), wheelNormal);
-                    float availableForce = gDotN + requiredCentripetal;
+                    float availableForce = dot(vec2(0, -g), wheelNormal) + requiredCentripetal;
 
-                    // Only detach if physics requires AND we have some speed
-                    if (availableForce < 0 && speed > minSpeed * 0.5f) {
+                    if (availableForce < 0 && speed > minSpeed) {
                         isFalling = true;
                         fallVelocity = speed * wheelTangent;
                         continue;
                     }
 
-                    // Update position parameter
+                    // Update position
                     float deltaT = (speed * dt) / tangentLength;
                     t += deltaT;
 
-                    if (t < 0) {
-                        t = 0;
-                        speed = 0;
+                    if (t < 0 || t > 1) {
                         isSimulating = false;
-                    }
-                    else if (t > 1) {
-                        t = 1;
-                        speed = 0;
-                        isSimulating = false;
-                    }
-                    if (speed == 0)
-                    {
-                        isSimulating = false;
-                        return;
+                        break;
                     }
 
                     // Update wheel position and rotation
-                    splinePoint = calculateSplinePoint(t);
-                    wheelPosition = splinePoint + wheelNormal * wheelRadius;
-                    wheelAngle -= 0.5f * speed * dt / wheelRadius;
+                    wheelPosition = calculateSplinePoint(t) + wheelNormal * wheelRadius;
+                    wheelAngle -= speed * dt / wheelRadius;
                 }
                 else {
                     isSimulating = false;
